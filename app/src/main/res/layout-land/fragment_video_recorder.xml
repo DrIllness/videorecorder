@@ -7,6 +7,7 @@
         android:id="@+id/texture"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
         android:layout_alignParentStart="true"
         android:layout_alignParentTop="true" />
 
@@ -14,9 +15,12 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_alignParentBottom="true"
-        android:layout_alignParentStart="true"
+        android:layout_alignParentEnd="true"
+        android:layout_alignParentTop="true"
         android:layout_below="@id/texture"
-        android:background="@color/fragmentBackground">
+        android:layout_toEndOf="@id/texture"
+        android:background="@android:color/black"
+        android:orientation="horizontal">
 
         <Button
             android:id="@+id/video"
@@ -27,10 +31,11 @@
 
         <ImageButton
             android:id="@+id/info"
-            android:contentDescription="@string/description_info"
+            style="@android:style/Widget.Material.Light.Button.Borderless"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_gravity="center_vertical|end"
+            android:layout_gravity="center_horizontal|bottom"
+            android:contentDescription="@string/description_info"
             android:padding="@dimen/button_padding"
             android:src="@drawable/ic_action_info" />
 
