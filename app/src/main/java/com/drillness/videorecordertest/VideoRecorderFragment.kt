@@ -38,6 +38,8 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat.checkSelfPermission
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
+import com.drillness.videorecordertest.Constants.REQUEST_VIDEO_PERMISSIONS
+import com.drillness.videorecordertest.Constants.VIDEO_PERMISSIONS
 import com.drillness.videorecordertest.widget.AutoFitTextureView
 import com.drillness.videorecordertest.dialog.ConfirmationDialog
 import com.drillness.videorecordertest.dialog.ErrorDialog
@@ -51,7 +53,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.RandomAccessFile
-import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
@@ -60,25 +61,22 @@ import kotlin.collections.ArrayList
 class VideoRecorderFragment : Fragment(), View.OnClickListener,
     ActivityCompat.OnRequestPermissionsResultCallback, MediaRecorder.OnInfoListener {
 
-    private val MAX_FILE_SIZE: Long = (1024 * 1024 * 5)
-    private val FRAME_RATE = 30
-    private val FRAGMENT_DIALOG = "dialog"
-    private val TAG = "Camera2VideoFragment"
-    private val SENSOR_ORIENTATION_DEFAULT_DEGREES = 90
-    private val SENSOR_ORIENTATION_INVERSE_DEGREES = 270
-
-    private val DEFAULT_ORIENTATIONS = SparseIntArray().apply {
-        append(Surface.ROTATION_0, 90)
-        append(Surface.ROTATION_90, 0)
-        append(Surface.ROTATION_180, 270)
-        append(Surface.ROTATION_270, 180)
-    }
-    private val INVERSE_ORIENTATIONS = SparseIntArray().apply {
-        append(Surface.ROTATION_0, 270)
-        append(Surface.ROTATION_90, 180)
-        append(Surface.ROTATION_180, 90)
-        append(Surface.ROTATION_270, 0)
-    }
+    private var stream: RandomAccessFile? = null
+    private lateinit var textureView: AutoFitTextureView
+    private lateinit var videoButton: Button
+    private var cameraDevice: CameraDevice? = null
+    private var captureSession: CameraCaptureSession? = null
+    private lateinit var previewSize: Size
+    private lateinit var videoSize: Size
+    private var isRecordingVideo = false
+    private var backgroundThread: HandlerThread? = null
+    private var backgroundHandler: Handler? = null
+    private val cameraOpenCloseLock = Semaphore(1)
+    private lateinit var previewRequestBuilder: CaptureRequest.Builder
+    private var sensorOrientation = 0
+    private lateinit var chunks: ArrayList<String>
+    private var nextVideoAbsolutePath: String? = null
+    private var mediaRecorder: MediaRecorder? = null
 
     private val surfaceTextureListener = object : TextureView.SurfaceTextureListener {
 
@@ -95,20 +93,7 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
         override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) = Unit
 
     }
-    private lateinit var textureView: AutoFitTextureView
-    private lateinit var videoButton: Button
-    private var cameraDevice: CameraDevice? = null
-    private var captureSession: CameraCaptureSession? = null
-    private lateinit var previewSize: Size
-    private lateinit var videoSize: Size
-    private var isRecordingVideo = false
-    private var backgroundThread: HandlerThread? = null
-    private var backgroundHandler: Handler? = null
-    private val cameraOpenCloseLock = Semaphore(1)
-    private lateinit var previewRequestBuilder: CaptureRequest.Builder
-    private var sensorOrientation = 0
 
-    private lateinit var chunks: ArrayList<String>
     private val stateCallback = object : CameraDevice.StateCallback() {
 
         override fun onOpened(cameraDevice: CameraDevice) {
@@ -130,12 +115,7 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
             this@VideoRecorderFragment.cameraDevice = null
             activity?.finish()
         }
-
     }
-
-    private var nextVideoAbsolutePath: String? = null
-
-    private var mediaRecorder: MediaRecorder? = null
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -149,6 +129,10 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
             it.setOnClickListener(this)
         }
         view.findViewById<View>(R.id.info).setOnClickListener(this)
+    }
+
+    override fun onResume() {
+        super.onResume()
         startBackgroundThread()
 
         if (textureView.isAvailable) {
@@ -156,6 +140,12 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
         } else {
             textureView.surfaceTextureListener = surfaceTextureListener
         }
+    }
+
+    override fun onPause() {
+        closeCamera()
+        stopBackgroundThread()
+        super.onPause()
     }
 
     override fun onClick(view: View) {
@@ -175,7 +165,7 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
     private fun startBackgroundThread() {
         backgroundThread = HandlerThread("CameraBackground")
         backgroundThread?.start()
-        backgroundHandler = Handler(backgroundThread?.looper)
+        backgroundHandler = Handler(backgroundThread?.looper!!)
     }
 
     private fun stopBackgroundThread() {
@@ -245,7 +235,6 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
             }
             val cameraId = manager.cameraIdList[0]
 
-            // Choose the sizes for camera preview and video recording
             val characteristics = manager.getCameraCharacteristics(cameraId)
             val map = characteristics.get(SCALER_STREAM_CONFIGURATION_MAP)
                 ?: throw RuntimeException("Cannot get available preview/video sizes")
@@ -268,8 +257,6 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
             showToast("Cannot access the camera.")
             cameraActivity.finish()
         } catch (e: NullPointerException) {
-            // Currently an NPE is thrown when the Camera2API is used but not supported on the
-            // device this code runs.
             ErrorDialog.newInstance(getString(R.string.camera_error))
                 .show(childFragmentManager, FRAGMENT_DIALOG)
         } catch (e: InterruptedException) {
@@ -304,7 +291,8 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
             val previewSurface = Surface(texture)
             previewRequestBuilder.addTarget(previewSurface)
 
-            cameraDevice?.createCaptureSession(listOf(previewSurface),
+            cameraDevice?.createCaptureSession(
+                listOf(previewSurface),
                 object : CameraCaptureSession.StateCallback() {
 
                     override fun onConfigured(session: CameraCaptureSession) {
@@ -320,7 +308,6 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
         } catch (e: CameraAccessException) {
             Log.e(TAG, e.toString())
         }
-
     }
 
     private fun updatePreview() {
@@ -367,8 +354,6 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
         textureView.setTransform(matrix)
     }
 
-    var stream: RandomAccessFile? = null
-
     @Throws(IOException::class)
     private fun setUpMediaRecorder() {
         val cameraActivity = activity ?: return
@@ -377,7 +362,6 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
             nextVideoAbsolutePath = getVideoFilePath(cameraActivity)
         }
         stream = RandomAccessFile(nextVideoAbsolutePath!!, "rw")
-
 
         val rotation = cameraActivity.windowManager.defaultDisplay.rotation
         when (sensorOrientation) {
@@ -417,7 +401,7 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
     private fun startRecordingVideo() {
         if (cameraDevice == null || !textureView.isAvailable) return
 
-        chunks = ArrayList<String>()
+        chunks = ArrayList()
 
         try {
             closePreviewSession()
@@ -440,7 +424,8 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
 
             // Start a capture session
             // Once the session starts, we can update the UI and start recording
-            cameraDevice?.createCaptureSession(surfaces,
+            cameraDevice?.createCaptureSession(
+                surfaces,
                 object : CameraCaptureSession.StateCallback() {
 
                     override fun onConfigured(cameraCaptureSession: CameraCaptureSession) {
@@ -463,7 +448,6 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
         } catch (e: IOException) {
             Log.e(TAG, e.toString())
         }
-
     }
 
     private fun closePreviewSession() {
@@ -483,8 +467,6 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
             mergeChunks()
         }
 
-        if (activity != null) showToast("Video saved: $nextVideoAbsolutePath")
-
         startPreview()
     }
 
@@ -498,7 +480,8 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
 
         // Create a media file name
         val filePath =
-            "${activity?.externalCacheDir?.absolutePath}" + File.separator + "TMP4_APP_OUT_" + getTimeStamp() + ".mp4"
+            "${activity?.externalCacheDir?.absolutePath}${File.separator}" +
+                    "output${System.currentTimeMillis()}.mp4"
 
         val videoTracks = LinkedList<Track>()
         val audioTracks = LinkedList<Track>()
@@ -514,63 +497,22 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
                     videoTracks.add(t)
                 }
             }
-
-            //adjustDurations(videoTracks, audioTracks, videoDuration, audioDuration)
         }
-
-        //Result movie from putting the audio and video together from the two clips
         val result = Movie()
 
-        //Append all audio and video
         if (videoTracks.size > 0)
             result.addTrack(AppendTrack(*videoTracks.toTypedArray()))
 
         if (audioTracks.size > 0)
             result.addTrack(AppendTrack(*audioTracks.toTypedArray()))
 
-
         val out = DefaultMp4Builder().build(result)
         val fc = RandomAccessFile(String.format(filePath), "rw").channel
         out.writeContainer(fc)
         fc.close()
-
-    }
-
-    fun getTimeStamp(): String {
-        return SimpleDateFormat("yyyyMMdd_HHmmss", Locale.ENGLISH).format(Date())
     }
 
     private fun showToast(message: String) = Toast.makeText(activity, message, LENGTH_SHORT).show()
-
-    private fun chooseVideoSize(choices: Array<Size>) = choices.firstOrNull {
-        it.width == it.height * 4 / 3 && it.width <= 1080
-    } ?: choices[choices.size - 1]
-
-    private fun chooseOptimalSize(
-        choices: Array<Size>,
-        width: Int,
-        height: Int,
-        aspectRatio: Size
-    ): Size {
-
-        // Collect the supported resolutions that are at least as big as the preview Surface
-        val w = aspectRatio.width
-        val h = aspectRatio.height
-        val bigEnough = choices.filter {
-            it.height == it.width * h / w && it.width >= width && it.height >= height
-        }
-
-        // Pick the smallest of those, assuming we found any
-        return if (bigEnough.isNotEmpty()) {
-            Collections.min(bigEnough, CompareSizesByArea())
-        } else {
-            choices[0]
-        }
-    }
-
-    companion object {
-        fun newInstance(): VideoRecorderFragment = VideoRecorderFragment()
-    }
 
     override fun onInfo(p0: MediaRecorder?, what: Int, p2: Int) {
         if (what == MEDIA_RECORDER_INFO_MAX_FILESIZE_APPROACHING) {
@@ -578,6 +520,72 @@ class VideoRecorderFragment : Fragment(), View.OnClickListener,
             chunks.add(chunk)
             mediaRecorder?.setNextOutputFile(FileOutputStream(chunk).fd)
         }
+    }
+
+    companion object {
+        private const val MAX_FILE_SIZE: Long = (1024 * 1024 * 5)
+        private const val FRAME_RATE = 30
+        private const val FRAGMENT_DIALOG = "dialog"
+        private const val TAG = "Camera2VideoFragment"
+        private const val SENSOR_ORIENTATION_DEFAULT_DEGREES = 90
+        private const val SENSOR_ORIENTATION_INVERSE_DEGREES = 270
+
+        private val DEFAULT_ORIENTATIONS = SparseIntArray()
+        private val INVERSE_ORIENTATIONS = SparseIntArray()
+
+        init {
+            DEFAULT_ORIENTATIONS.apply {
+                append(Surface.ROTATION_0, 90)
+                append(Surface.ROTATION_90, 0)
+                append(Surface.ROTATION_180, 270)
+                append(Surface.ROTATION_270, 180)
+            }
+
+            INVERSE_ORIENTATIONS.apply {
+                append(Surface.ROTATION_0, 270)
+                append(Surface.ROTATION_90, 180)
+                append(Surface.ROTATION_180, 90)
+                append(Surface.ROTATION_270, 0)
+            }
+        }
+
+        fun newInstance(): VideoRecorderFragment = VideoRecorderFragment()
+
+        @JvmStatic
+        private fun chooseVideoSize(choices: Array<Size>) = choices.firstOrNull {
+            it.width == it.height * 4 / 3 && it.width <= 1080
+        } ?: choices[choices.size - 1]
+
+        @JvmStatic
+        private fun chooseOptimalSize(
+            choices: Array<Size>,
+            width: Int,
+            height: Int,
+            aspectRatio: Size
+        ): Size {
+            // Collect the supported resolutions that are at least as big as the preview Surface
+            val w = aspectRatio.width
+            val h = aspectRatio.height
+            val bigEnough = choices.filter {
+                it.height == it.width * h / w && it.width >= width && it.height >= height
+            }
+
+            // Pick the smallest of those, assuming we found any
+            return if (bigEnough.isNotEmpty()) {
+                Collections.min(bigEnough, CompareSizesByArea())
+            } else {
+                choices[0]
+            }
+        }
+    }
+
+    class CompareSizesByArea : Comparator<Size> {
+
+        override fun compare(lhs: Size, rhs: Size) =
+            java.lang.Long.signum(
+                lhs.width.toLong() * lhs.height - rhs.width.toLong()
+                        * rhs.height
+            )
     }
 
 }
